@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+# Function for printing a menu
+function menu {
+    echo -e "${GREEN}Choose the stage of the recon process:${NC}"
+    echo "1) Subdomain Enumeration"
+    echo "2) Live Domain Checking"
+    echo "3) Vulnerability Scanning"
+    echo "4) Fuzzing for Information Disclosure"
+    echo "5) Virtual Host Discovery"
+    echo "6) Port Scanning"
+    echo "7) Run All"
+    read -p "Select an option [1-7]: " OPTION
+}
+
+# Check if required tools are installed
+function check_tools {
+    tools=("amass" "subfinder" "assetfinder" "httpx" "nuclei" "ffuf" "massdns" "nmap" "waybackurls" "github-subdomains" "urlscan")
+    for tool in "${tools[@]}"; do
+        if ! command -v $tool &> /dev/null; then
+            echo -e "${RED}$tool is not installed. Please install it to proceed.${NC}"
+            exit 1
+        fi
+    done
+}
+
+# Subdomain Enumeration
+function subdomain_enum {
+    read -p "Enter the root domain: " domain
+    echo -e "${GREEN}Starting subdomain enumeration for $domain...${NC}"
+    
+    mkdir -p recon/$domain/subdomains
+
+    # Amass
+    echo -e "${GREEN}[+] Running Amass...${NC}"
+    amass enum -d $domain -o recon/$domain/subdomains/amass.txt   
+
+    # Subfinder
+    echo -e "${GREEN}[+] Running Subfinder...${NC}"
+    subfinder -d $domain -o recon/$domain/subdomains/subfinder.txt
+
+    # Assetfinder
+    echo -e "${GREEN}[+] Running Assetfinder...${NC}"
+    assetfinder --subs-only $domain > recon/$domain/subdomains/assetfinder.txt
+
+    # Crt.sh scraping
+    echo -e "${GREEN}[+] Running crt.sh...${NC}"
+    curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u > recon/$domain/subdomains/crt.txt
+
+    # Github Subdomains
+    echo -e "${GREEN}[+] Running Github-subdomains...${NC}"
+    github-subdomains -d $domain -o recon/$domain/subdomains/github.txt
+
+    # Waybackurls
+    echo -e "${GREEN}[+] Fetching URLs from Wayback Machine...${NC}"
+    echo $domain | waybackurls | grep $domain > recon/$domain/subdomains/waybackurls.txt
+
+    # Urlscan
+    echo -e "${GREEN}[+] Fetching URLs from Urlscan.io...${NC}"
+    curl -s "https://urlscan.io/api/v1/search/?q=domain:$domain" | jq -r '.results[].task.url' | grep $domain > recon/$domain/subdomains/urlscan.txt
+
+    echo -e "${GREEN}Subdomain enumeration completed!${NC}"
+
+    # Combining Results
+    echo -e "${GREEN}[+] Combining all subdomains...${NC}"
+    cat recon/$domain/subdomains/*.txt | sort -u > recon/$domain/subdomains/all_subdomains.txt
+}
+
+# Live Domain Checking
+function live_domain_check {
+    read -p "Enter the root domain (used for subdomain enum): " domain
+    echo -e "${GREEN}Starting live domain check for $domain...${NC}"
+    
+    mkdir -p recon/$domain/live_domains
+
+    cat recon/$domain/subdomains/all_subdomains.txt | httpx -silent -o recon/$domain/live_domains/live_domains.txt
+
+    echo -e "${GREEN}Live domain check completed!${NC}"
+}
+
+# fuzz for endpoints
+function fuzz_endpoints {
+    echo -e "${GREEN}Starting endpoint fuzzing...${NC}"
+    
+    # FFUF fuzzing
+    ffuf -u https://$domain/FUZZ -w /path/to/wordlist.txt -mc 200 -of md -o recon/$domain/subdomains/ffuf_results.txt
+    awk '!seen[$6]++' recon/$domain/subdomains/ffuf_results.txt > recon/$domain/subdomains/unique_ffuf_results.txt
+    grep -oP 'https:\/\/[^\s]+' recon/$domain/subdomains/unique_ffuf_results.txt | sed '1d' > recon/$domain/subdomains/unique-ffuf-urls.txt && rm recon/$domain/subdomains/unique_ffuf_results.txt
+
+    echo -e "${GREEN}Endpoint fuzzing completed.${NC}"
+
+    # Combining Results
+    echo -e "${GREEN}[+] Combining all subdomains...${NC}"
+    cat recon/$domain/subdomains/*.txt | sort -u > recon/$domain/subdomains/all_subdomains.txt
+}
+
+
+
+# Vulnerability Scanning
+function vuln_scan {
+    read -p "Enter the root domain (used for subdomain enum): " domain
+    echo -e "${GREEN}Starting vulnerability scanning for live domains...${NC}"
+    
+    mkdir -p recon/$domain/vulnerabilities
+
+    nuclei -l recon/$domain/live_domains/live_domains.txt -o recon/$domain/vulnerabilities/nuclei_scan.txt
+
+    echo -e "${GREEN}Vulnerability scan completed!${NC}"
+}
+
+# Fuzzing for Information Disclosure
+function fuzz_endpoints {
+    read -p "Enter the root domain (used for subdomain enum): " domain
+    echo -e "${GREEN}Starting fuzzing for information disclosure on live domains...${NC}"
+    
+    mkdir -p recon/$domain/fuzzing
+
+    while read live_domain; do
+        ffuf -u $live_domain/FUZZ -w /path/to/wordlist.txt -o recon/$domain/fuzzing/fuzz_$live_domain.txt
+    done < recon/$domain/live_domains/live_domains.txt
+
+    echo -e "${GREEN}Fuzzing completed!${NC}"
+}
+
+# Virtual Host Discovery
+function vhost_discovery {
+    read -p "Enter the root domain (used for subdomain enum): " domain
+    echo -e "${GREEN}Starting virtual host discovery for $domain...${NC}"
+    
+    mkdir -p recon/$domain/vhosts
+
+    massdns -r /path/to/resolvers.txt -t A -o S recon/$domain/subdomains/all_subdomains.txt > recon/$domain/vhosts/vhosts.txt
+
+    echo -e "${GREEN}Virtual host discovery completed!${NC}"
+}
+
+# Port Scanning
+function port_scan {
+    read -p "Enter the root domain (used for subdomain enum): " domain
+    echo -e "${GREEN}Starting port scanning on live domains for $domain...${NC}"
+    
+    mkdir -p recon/$domain/ports
+
+    nmap -iL recon/$domain/live_domains/live_domains.txt -oN recon/$domain/ports/nmap_scan.txt
+
+    echo -e "${GREEN}Port scanning completed!${NC}"
+}
+
+# Main Script
+check_tools
+menu
+
+case $OPTION in
+    1)
+        subdomain_enum
+        ;;
+    2)
+        live_domain_check
+        ;;
+    3)
+        vuln_scan
+        ;;
+    4)
+        fuzz_endpoints
+        ;;
+    5)
+        vhost_discovery
+        ;;
+    6)
+        port_scan
+        ;;
+    7)
+        subdomain_enum
+        live_domain_check
+        vuln_scan
+        fuzz_endpoints
+        vhost_discovery
+        port_scan
+        ;;
+    *)
+        echo -e "${RED}Invalid option. Exiting...${NC}"
+        exit 1
+        ;;
+esac
